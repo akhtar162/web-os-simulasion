@@ -1,11 +1,6 @@
 <!DOCTYPE html>
 <html lang="id">
 <head>
-    <!-- COOP/COEP untuk enable SharedArrayBuffer (dibutuhin VITS WASM) -->
-    <!-- Note: Hosting harus set header ini, atau pakai script workaround di bawah -->
-    <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
-    <meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
-
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Akhtar OS</title>
@@ -451,16 +446,6 @@
         }
         .notif-dismiss:hover { color: white; }
     </style>
-<!--
-    CATATAN HOSTING:
-    Agar VITS WASM jalan optimal, server hosting harus set HTTP headers:
-    Cross-Origin-Opener-Policy: same-origin
-    Cross-Origin-Embedder-Policy: require-corp
-    
-    Untuk Netlify: tambah file _headers
-    Untuk Vercel: tambah di vercel.json
-    Untuk GitHub Pages: pakai coi-serviceworker trick (sudah dihandle di bawah)
--->
 </head>
 <body>
 
@@ -689,7 +674,11 @@
         let wibuClickCount = 0;
 
         // Forward declaration — full implementation injected below
-        // getAppDisplayName defined below after mode data
+        function getAppDisplayName(app) {
+            // Will be overridden once mode data is loaded below
+            // Safe fallback: return original name
+            return app.name;
+        }
 
         // ===== 39 PERBEDAAN MODE WIBU =====
         // 1. RAM warning quotes anime
@@ -791,6 +780,8 @@
                 addWibuScrollbar();
                 // 36. Idle floating emojis
                 startWibuIdleEmojis();
+                // 37. Anime 3D Character
+                createAnime3DCharacter();
                 // Play greeting
                 const g = wibuGreetings[Math.floor(Math.random() * wibuGreetings.length)];
                 showWibuNotification(g, -1);
@@ -810,6 +801,7 @@
                 if (startTitle) startTitle.textContent = 'Aplikasi';
                 removeWibuScrollbar();
                 stopWibuIdleEmojis();
+                destroyAnime3DCharacter();
                 wibuClickCount = 0;
             }
         }
@@ -901,6 +893,361 @@
             if (wibuIdleInterval) { clearInterval(wibuIdleInterval); wibuIdleInterval = null; }
             document.querySelectorAll('.wibu-float-emoji').forEach(e => e.remove());
         }
+
+        // =============================================
+        // 🌸 ALYA 3D MODEL - POP UP CHARACTER 🌸
+        // =============================================
+
+        // GLB loaded from relative URL
+
+        let alyaRenderer = null, alyaScene = null, alyaCamera = null;
+        let alyaRAF = null, alyaContainer = null, alyaMixer = null;
+        let alyaClock = null, alyaModel = null, alyaVisible = false;
+        let alyaPopTimer = null, alyaSpeechTimer = null, alyaAutoTimer = null;
+        let alyaT = 0, alyaIdleT = 0;
+        let alyaAnimations = [];
+
+        const alyaSpeeches = [
+            "A-ano... senpai~ 💕","Ohayou~! ☀️","Kyaa~! 😳",
+            "Sugoi desu ne~! ✨","Ganbare~! 💪","Ehehe~ 🌸",
+            "Suki desu~ ❤️","H-hontou?! ✨","Moshi moshi~ 📱",
+            "Kawaii~! 🎀","Mata ne~ 👋","U-ureshii~! 💖",
+            "Daijoubu~ 🌷","Alya desu~ 🌸","Konnichiwa senpai~! 👋"
+        ];
+
+        function createAnime3DCharacter() {
+            destroyAnime3DCharacter();
+            if (typeof THREE === 'undefined') { loadThreeJS(initAlyaCharacter); return; }
+            initAlyaCharacter();
+        }
+
+        function loadThreeJS(cb) {
+            const s1 = document.createElement('script');
+            s1.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+            s1.onload = () => {
+                const s2 = document.createElement('script');
+                s2.src = 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js';
+                s2.onload = cb;
+                document.head.appendChild(s2);
+            };
+            document.head.appendChild(s1);
+        }
+
+        function initAlyaCharacter() {
+            const desktop = document.getElementById('desktop');
+            if (!desktop) return;
+
+            // --- CSS ---
+            if (!document.getElementById('anime-char-css')) {
+                const s = document.createElement('style');
+                s.id = 'anime-char-css';
+                s.textContent = `
+                    #alya-container {
+                        position: absolute;
+                        bottom: -320px;
+                        right: 40px;
+                        width: 240px;
+                        height: 380px;
+                        z-index: 8;
+                        pointer-events: all;
+                        transition: bottom 0.9s cubic-bezier(0.34, 1.42, 0.64, 1);
+                        filter: drop-shadow(0 -8px 30px rgba(220,100,255,0.55))
+                                drop-shadow(0 0 60px rgba(180,80,255,0.2));
+                    }
+                    #alya-container.visible {
+                        bottom: 50px;
+                    }
+                    #alya-container canvas {
+                        border-radius: 0 !important;
+                        background: transparent !important;
+                    }
+                    #alya-speech {
+                        position: absolute;
+                        bottom: 370px;
+                        right: 0;
+                        background: linear-gradient(135deg, rgba(255,80,160,0.97), rgba(140,40,220,0.97));
+                        color: #fff;
+                        font-family: 'Segoe UI', sans-serif;
+                        font-size: 12px;
+                        font-weight: 700;
+                        padding: 8px 14px;
+                        border-radius: 14px 14px 3px 14px;
+                        white-space: nowrap;
+                        pointer-events: none;
+                        box-shadow: 0 4px 20px rgba(255,80,160,0.55);
+                        border: 1.5px solid rgba(255,255,255,0.5);
+                        opacity: 0;
+                        transform: scale(0.5) translateY(10px);
+                        transition: opacity 0.35s cubic-bezier(0.34,1.56,0.64,1),
+                                    transform 0.35s cubic-bezier(0.34,1.56,0.64,1);
+                        z-index: 9;
+                    }
+                    #alya-speech.show {
+                        opacity: 1;
+                        transform: scale(1) translateY(0);
+                    }
+                    .alya-heart {
+                        position: absolute;
+                        font-size: 20px;
+                        pointer-events: none;
+                        animation: alyaHeartPop 1s ease-out forwards;
+                        z-index: 10;
+                    }
+                    @keyframes alyaHeartPop {
+                        0%   { transform: translateY(0) scale(1); opacity:1; }
+                        50%  { transform: translateY(-50px) scale(1.6); opacity:1; }
+                        100% { transform: translateY(-100px) scale(0.5); opacity:0; }
+                    }
+                    #alya-loading {
+                        position: absolute;
+                        inset: 0;
+                        display: flex;
+                        flex-direction: column;
+                        align-items: center;
+                        justify-content: center;
+                        color: rgba(255,150,220,0.9);
+                        font-family: sans-serif;
+                        font-size: 13px;
+                        font-weight: 600;
+                        gap: 10px;
+                        pointer-events: none;
+                    }
+                    .alya-spinner {
+                        width: 32px; height: 32px;
+                        border: 3px solid rgba(255,100,200,0.2);
+                        border-top: 3px solid rgba(255,100,200,0.9);
+                        border-radius: 50%;
+                        animation: alyaSpin 0.8s linear infinite;
+                    }
+                    @keyframes alyaSpin { to { transform: rotate(360deg); } }
+                    #alya-container:hover {
+                        filter: drop-shadow(0 -8px 40px rgba(255,100,220,0.75))
+                                drop-shadow(0 0 80px rgba(200,80,255,0.3));
+                    }
+                `;
+                document.head.appendChild(s);
+            }
+
+            // --- Container ---
+            const cont = document.createElement('div');
+            cont.id = 'alya-container';
+            alyaContainer = cont;
+
+            const loading = document.createElement('div');
+            loading.id = 'alya-loading';
+            loading.innerHTML = '<div class="alya-spinner"></div><span>Loading Alya~ 🌸</span>';
+            cont.appendChild(loading);
+
+            const speech = document.createElement('div');
+            speech.id = 'alya-speech';
+            cont.appendChild(speech);
+
+            desktop.appendChild(cont);
+
+            // --- Three.js Setup ---
+            alyaClock = new THREE.Clock();
+            alyaScene = new THREE.Scene();
+            alyaCamera = new THREE.PerspectiveCamera(28, 240/380, 0.1, 100);
+            alyaCamera.position.set(0, 1.2, 4.2);
+            alyaCamera.lookAt(0, 0.8, 0);
+
+            alyaRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, premultipliedAlpha: false });
+            alyaRenderer.setSize(240, 380);
+            alyaRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            alyaRenderer.outputEncoding = THREE.sRGBEncoding;
+            alyaRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+            alyaRenderer.toneMappingExposure = 1.2;
+            alyaRenderer.shadowMap.enabled = true;
+            alyaRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            alyaRenderer.setClearColor(0x000000, 0);
+            cont.appendChild(alyaRenderer.domElement);
+
+            // Lights
+            const ambient = new THREE.AmbientLight(0xffeeff, 0.9);
+            alyaScene.add(ambient);
+
+            const keyLight = new THREE.DirectionalLight(0xfff0ff, 1.4);
+            keyLight.position.set(2, 4, 3);
+            keyLight.castShadow = true;
+            alyaScene.add(keyLight);
+
+            const fillLight = new THREE.DirectionalLight(0xddeeff, 0.6);
+            fillLight.position.set(-2, 2, 2);
+            alyaScene.add(fillLight);
+
+            const rimLight = new THREE.PointLight(0xff80ff, 0.8, 12);
+            rimLight.position.set(-1, 3, -2);
+            alyaScene.add(rimLight);
+
+            const bottomLight = new THREE.PointLight(0xcc88ff, 0.4, 8);
+            bottomLight.position.set(0, -1, 2);
+            alyaScene.add(bottomLight);
+
+            // Load GLB from relative URL
+            const loader = new THREE.GLTFLoader();
+            loader.load('./alya.glb', (gltf) => {
+                loading.remove();
+                alyaModel = gltf.scene;
+
+                // Auto-scale & center
+                const box = new THREE.Box3().setFromObject(alyaModel);
+                const size = box.getSize(new THREE.Vector3());
+                const center = box.getCenter(new THREE.Vector3());
+                const maxDim = Math.max(size.x, size.y, size.z);
+                const scale = 2.2 / maxDim;
+                alyaModel.scale.setScalar(scale);
+                alyaModel.position.sub(center.multiplyScalar(scale));
+                alyaModel.position.y -= 0.3;
+
+                // Enable shadows & improve materials
+                alyaModel.traverse(node => {
+                    if (node.isMesh) {
+                        node.castShadow = true;
+                        node.receiveShadow = true;
+                        if (node.material) {
+                            if (Array.isArray(node.material)) {
+                                node.material.forEach(m => improveMaterial(m));
+                            } else {
+                                improveMaterial(node.material);
+                            }
+                        }
+                    }
+                });
+
+                alyaScene.add(alyaModel);
+
+                // Animations
+                if (gltf.animations && gltf.animations.length > 0) {
+                    alyaMixer = new THREE.AnimationMixer(alyaModel);
+                    alyaAnimations = gltf.animations;
+                    // Play first animation (usually idle)
+                    const idle = gltf.animations[0];
+                    const action = alyaMixer.clipAction(idle);
+                    action.play();
+                }
+
+                // Pop up!
+                setTimeout(() => popUpAlya(), 300);
+                startAlyaRenderLoop();
+                scheduleAlyaAutoSpeech();
+                setTimeout(() => showAlyaSpeech(), 1500);
+
+            }, (xhr) => {
+                // progress
+            }, (err) => {
+                console.error('GLB load error:', err);
+                loading.innerHTML = '<span style="color:#ff6080">Load error 😢<br><small>Pastiin alya.glb ada di folder yang sama!</small></span>';
+            });
+
+            // Click
+            cont.addEventListener('click', alyaOnClick);
+        }
+
+        function improveMaterial(mat) {
+            if (mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial) {
+                mat.roughness = Math.min(mat.roughness || 0.5, 0.7);
+                mat.envMapIntensity = 0.4;
+            }
+            if (mat.map) mat.map.anisotropy = 4;
+        }
+
+        function popUpAlya() {
+            if (!alyaContainer) return;
+            alyaContainer.classList.add('visible');
+            alyaVisible = true;
+        }
+
+        function hideAlya() {
+            if (!alyaContainer) return;
+            alyaContainer.classList.remove('visible');
+            alyaVisible = false;
+        }
+
+        function startAlyaRenderLoop() {
+            function tick() {
+                if (!alyaRenderer || !alyaScene || !alyaCamera) return;
+                alyaRAF = requestAnimationFrame(tick);
+                const delta = alyaClock.getDelta();
+                alyaT += delta;
+                alyaIdleT += delta;
+
+                if (alyaMixer) alyaMixer.update(delta);
+
+                // Gentle idle float + sway
+                if (alyaModel) {
+                    alyaModel.rotation.y = Math.sin(alyaIdleT * 0.5) * 0.08 + 0.05;
+                    alyaModel.position.y = -0.3 + Math.sin(alyaIdleT * 1.2) * 0.012;
+                }
+
+                alyaRenderer.render(alyaScene, alyaCamera);
+            }
+            tick();
+        }
+
+        function showAlyaSpeech(msg) {
+            const b = document.getElementById('alya-speech');
+            if (!b) return;
+            b.textContent = msg || alyaSpeeches[Math.floor(Math.random() * alyaSpeeches.length)];
+            b.classList.add('show');
+            if (alyaSpeechTimer) clearTimeout(alyaSpeechTimer);
+            alyaSpeechTimer = setTimeout(() => b && b.classList.remove('show'), 2800);
+        }
+
+        function scheduleAlyaAutoSpeech() {
+            function doIt() {
+                if (!document.getElementById('alya-container')) return;
+                if (alyaVisible && Math.random() < 0.7) showAlyaSpeech();
+                alyaAutoTimer = setTimeout(doIt, 5000 + Math.random() * 8000);
+            }
+            alyaAutoTimer = setTimeout(doIt, 5000);
+        }
+
+        function alyaOnClick(e) {
+            e.stopPropagation();
+            showAlyaSpeech();
+            spawnAlyaHeart();
+            // Spin reaction
+            if (alyaModel) {
+                const startY = alyaModel.rotation.y;
+                let t = 0;
+                const spin = setInterval(() => {
+                    t += 0.05;
+                    if (alyaModel) alyaModel.rotation.y = startY + Math.sin(t * 5) * 0.3;
+                    if (t >= 1) clearInterval(spin);
+                }, 16);
+            }
+        }
+
+        function spawnAlyaHeart() {
+            if (!alyaContainer) return;
+            for (let i = 0; i < 3; i++) {
+                setTimeout(() => {
+                    const h = document.createElement('div');
+                    h.className = 'alya-heart';
+                    h.style.right = (10 + Math.random() * 180) + 'px';
+                    h.style.bottom = (80 + Math.random() * 120) + 'px';
+                    h.textContent = ['💕','💖','✨','🌸','💗','🔮','⭐'][Math.floor(Math.random()*7)];
+                    alyaContainer.appendChild(h);
+                    setTimeout(() => h.remove(), 1100);
+                }, i * 150);
+            }
+        }
+
+        function destroyAnime3DCharacter() {
+            if (alyaRAF) { cancelAnimationFrame(alyaRAF); alyaRAF = null; }
+            if (alyaPopTimer) { clearTimeout(alyaPopTimer); alyaPopTimer = null; }
+            if (alyaSpeechTimer) { clearTimeout(alyaSpeechTimer); alyaSpeechTimer = null; }
+            if (alyaAutoTimer) { clearTimeout(alyaAutoTimer); alyaAutoTimer = null; }
+            if (alyaRenderer) { alyaRenderer.dispose(); alyaRenderer = null; }
+            if (alyaMixer) { alyaMixer.stopAllAction(); alyaMixer = null; }
+            alyaScene = null; alyaCamera = null; alyaModel = null;
+            const c = document.getElementById('alya-container');
+            if (c) c.remove();
+            const css = document.getElementById('anime-char-css');
+            if (css) css.remove();
+            alyaContainer = null;
+        }
+
 
         // Sound system for wibu (17-20)
         function playWibuChime(type) {
@@ -1012,178 +1359,6 @@
 
         // 38. Desktop click listener for headpats
         document.addEventListener('click', () => { if (osWibuMode) wibuHeadpat(); });
-
-        // =============================================
-        // ===== 🎀 ANIME GIRL VOICE SYSTEM v2 =====
-        // TTS (Web Speech) + Web Audio blip effects
-        // =============================================
-        // ===== 🎀 VITS ANIME VOICE SYSTEM =====
-        // @diffusionstudio/vits-web — runs pure in browser via WASM
-        // Voice: en_US-hfc_female-medium (paling natural & "anime")
-        // =============================================
-        let animeVoiceEnabled = true;
-        let animeVoicePlaying = false;
-        let animeAudioCtx = null;
-        let animeLastSpeak = 0;
-        const ANIME_SPEAK_COOLDOWN = 6000; // 6 detik cooldown
-
-        // VITS state
-        let vitsReady = false;
-        let vitsLoading = false;
-        // ── VITS Bridge ─────────────────────────────────────
-        // TTS sekarang di-handle oleh VITS module script (type="module" di bawah)
-        // Fungsi ini jadi bridge buat backward compat dengan hooks yang ada
-        function speakAnime(text, opts = {}) {
-            if (!osWibuMode || !animeVoiceEnabled) return;
-            // Audio blip tetap jalan (Web Audio)
-            playAnimeBlip(opts.blip || 'default');
-            // Delegate ke VITS module via bridge
-            setTimeout(() => {
-                if (window._vitsSpeakBridge) {
-                    window._vitsSpeakBridge(text, opts);
-                }
-            }, 180);
-        }
-
-
-        // ── Phrase banks ──────────────────────────────────
-        const animeV = {
-            greeting: ['Ohayo gozaimasu senpai! Welcome back!','Konnichiwa! Finally you are here senpai!','Okaeri nasai senpai! I have been waiting!','Yatta! Senpai logged in! Sugoi!','Konbanwa senpai! Nice to see you again!'],
-            open:     ['Yatta! App is opened senpai!','Sugoi! Loading now senpai!','Hai hai! Ready to use!','Ikuzo senpai! Lets go!','Kawaii! App is active!'],
-            close:    ['Sayonara senpai! See you again!','Mata ne senpai! Jangan lupa balik ya!','Bye bye! Aku kangen deh!','Jaa ne senpai! See you!','Oyasumi senpai!'],
-            ram:      ['Yamete kudasai senpai! RAM is full!','Oh no! RAM is almost out, please close some apps!','Nani! RAM is about to explode senpai!','Senpai! RAM chan needs help, it is full!','Dame dame! RAM is overloaded senpai!'],
-            headpat:  ['Kyaa!','Senpai!','Iyaa!','Kimochi!','Uwa!','Ehh!','Sugoi!','Aaah!','Mou!'],
-            milestone:['One hundred times! Senpai daisuki! Arigatou gozaimasu! I am so happy!'],
-            minimize: ['Okay stored for now senpai!','Alright I will wait down here!'],
-            maximize: ['Wow so big! Sugoi senpai!','Waaah full screen! Kakkoi desu!'],
-            error:    ['Oh no there is an error senpai, gomenasai!','Nande?! Why is there an error?! Gomen ne senpai!','Shimatta! There is a problem senpai!'],
-            idle:     ['Senpai... masih di sini?','Aku bosen nunggu senpai~','Hey senpai jangan lupa aku ya!','Senpai dozo, klik aku~','Hmm senpai lagi ngapain ya?'],
-            vol_on:   ['Anime voice is on again! Kyaa! Yatta senpai!'],
-        };
-
-        // ── VITS model download progress notif ─────────
-        // Tampilkan progress bar pertama kali download model (~50MB)
-        function showVITSProgress(pct) {
-            let bar = document.getElementById('vits-progress');
-            if (!bar) {
-                bar = document.createElement('div');
-                bar.id = 'vits-progress';
-                bar.style.cssText = 'position:fixed;bottom:55px;right:20px;z-index:99998;background:linear-gradient(135deg,rgba(30,0,20,0.95),rgba(60,0,40,0.95));color:#ff9de2;padding:10px 16px;border-radius:12px;font-size:12px;font-family:sans-serif;border:1px solid #ff6b9d;min-width:220px;';
-                bar.innerHTML = '<div style="font-weight:bold;margin-bottom:6px;">🌸 VITS Model Loading~</div><div id="vits-pbar-wrap" style="background:#333;border-radius:4px;height:6px;overflow:hidden;"><div id="vits-pbar" style="background:linear-gradient(90deg,#ff6b9d,#c44dff);height:100%;width:0%;transition:width 0.3s;border-radius:4px;"></div></div><div id="vits-pct" style="margin-top:4px;font-size:11px;text-align:right;">0%</div>';
-                document.body.appendChild(bar);
-            }
-            document.getElementById('vits-pbar').style.width = pct + '%';
-            document.getElementById('vits-pct').textContent = pct + '%';
-            if (pct >= 100) setTimeout(() => { bar.style.opacity='0'; bar.style.transition='opacity 0.5s'; setTimeout(()=>bar.remove(), 500); }, 1500);
-        }
-
-        // Override loadVITS biar tampilkan progress
-        const _origLoadVITS = loadVITS;
-        loadVITS = async function() {
-            if (vitsReady || vitsLoading) return;
-            vitsLoading = true;
-            try {
-                await _origLoadVITS();
-                showVITSProgress(100);
-                if (osWibuMode) addOsNotification('🎤🌸', 'VITS Ready!', 'Suara anime VITS sudah siap! Kyaa~');
-            } catch(e) {
-                console.warn('[VITS] failed:', e);
-                vitsLoading = false;
-                const bar = document.getElementById('vits-progress'); if(bar) bar.remove();
-            }
-        };
-
-        // ── Event hooks (sama kayak sebelumnya) ──────────
-
-        // Hook 1: wibu mode aktif → greeting
-        const _avApply = applyWibuMode;
-        applyWibuMode = function(enable) {
-            _avApply(enable);
-            if (enable) {
-                setTimeout(() => {
-                    playAnimeBlip('login');
-                    setTimeout(() => speakAnime(animeV.greeting[Math.floor(Math.random()*animeV.greeting.length)], {pitch:2.0,rate:1.15,volume:1.0,delay:300,force:true}), 400);
-                }, 800);
-                animeIdleInterval = setInterval(() => {
-                    if (osWibuMode && animeVoiceEnabled && Math.random() > 0.55)
-                        speakAnime(animeV.idle[Math.floor(Math.random()*animeV.idle.length)], {blip:'default'});
-                }, 90000);
-            } else {
-                if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel();
-                animeVoicePlaying = false;
-                if (animeIdleInterval) { clearInterval(animeIdleInterval); animeIdleInterval = null; }
-            }
-        };
-        let animeIdleInterval = null;
-
-        // Hook 2: buka app
-        const _avOpen = openWindow;
-        openWindow = function(appId) {
-            if (osWibuMode && animeVoiceEnabled)
-                speakAnime(animeV.open[Math.floor(Math.random()*animeV.open.length)], {blip:'excited'});
-            if (typeof onAnimeCharEvent === 'function') onAnimeCharEvent('open');
-            _avOpen(appId);
-        };
-
-        // Hook 3: tutup app
-        const _avClose = closeWindow;
-        closeWindow = function(appId) {
-            if (osWibuMode && animeVoiceEnabled)
-                speakAnime(animeV.close[Math.floor(Math.random()*animeV.close.length)], {blip:'sad'});
-            if (typeof onAnimeCharEvent === 'function') onAnimeCharEvent('close');
-            _avClose(appId);
-        };
-
-        // Hook 4: notif & RAM warning
-        const _avNotif = showWibuNotification;
-        showWibuNotification = function(msg, pct) {
-            _avNotif(msg, pct);
-            if (!osWibuMode || !animeVoiceEnabled) return;
-            if (pct >= 0) {
-                speakAnime(animeV.ram[Math.floor(Math.random()*animeV.ram.length)], {blip:'alert'});
-            } else if (msg.includes('True Wibu') || msg.includes('100 headpat')) {
-                playAnimeBlip('login');
-                setTimeout(() => speakAnime(animeV.milestone[0], {delay:300,force:true}), 300);
-            } else if (msg.includes('error') || msg.includes('Error')) {
-                speakAnime(animeV.error[Math.floor(Math.random()*animeV.error.length)], {blip:'sad'});
-            }
-        };
-
-        // Hook 5: headpat klik
-        const _avHeadpat = wibuHeadpat;
-        wibuHeadpat = function() {
-            _avHeadpat();
-            if (osWibuMode && animeVoiceEnabled && Math.random() > 0.45)
-                speakAnime(animeV.headpat[Math.floor(Math.random()*animeV.headpat.length)], {blip:'headpat',delay:100,force:true});
-        };
-
-        // Hook 6: minimize
-        const _avMin = minimizeWindow;
-        minimizeWindow = function(appId) {
-            _avMin(appId);
-            if (osWibuMode && animeVoiceEnabled && Math.random() > 0.5)
-                speakAnime(animeV.minimize[Math.floor(Math.random()*animeV.minimize.length)], {blip:'default'});
-        };
-
-        // Hook 7: maximize
-        const _avMax = maximizeWindow;
-        maximizeWindow = function(appId) {
-            _avMax(appId);
-            if (osWibuMode && animeVoiceEnabled && Math.random() > 0.5)
-                speakAnime(animeV.maximize[Math.floor(Math.random()*animeV.maximize.length)], {blip:'excited'});
-        };
-
-        // Ctrl+Shift+V → toggle suara ON/OFF
-        document.addEventListener('keydown', e => {
-            if (e.ctrlKey && e.shiftKey && e.key === 'V') {
-                animeVoiceEnabled = !animeVoiceEnabled;
-                if (!animeVoiceEnabled) { if(typeof speechSynthesis!=='undefined') speechSynthesis.cancel(); animeVoicePlaying=false; }
-                const msg = animeVoiceEnabled ? 'Suara VITS ON! Kyaa~! 🎤🌸' : 'Suara VITS OFF~ Ja ne! 🔇';
-                if (osWibuMode) showWibuNotification(msg, -1);
-                if (animeVoiceEnabled) setTimeout(() => speakAnime(animeV.vol_on[0], {blip:'excited',force:true}), 200);
-            }
-        });
-
 
 
         const apps = [
@@ -6292,626 +6467,5 @@ void loop() {
         };
 
     </script>
-
-
-<!-- ================================================== -->
-<!-- 🌸 VITS-WEB TTS + VRM 3D ANIME CHAR (Three.js v3) -->
-<!-- ================================================== -->
-
-<!-- Import map untuk Three.js ESM + VRM v3 -->
-<script type="importmap">
-{
-  "imports": {
-    "three":          "https://cdn.jsdelivr.net/npm/three@0.176.0/build/three.module.js",
-    "three/addons/":  "https://cdn.jsdelivr.net/npm/three@0.176.0/examples/jsm/",
-    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.min.js"
-  }
-}
-</script>
-
-<!-- VITS-web via ESM (pure browser WASM TTS) -->
-<script type="module">
-// Load vits-web via dynamic import — lebih robust, handle ESM/CJS differences
-async function loadVitsLib() {
-  const urls = [
-    // esm.sh auto-converts CJS → ESM
-    'https://esm.sh/@diffusionstudio/vits-web@1.0.3',
-    // jsdelivr ESM build
-    'https://cdn.jsdelivr.net/npm/@diffusionstudio/vits-web@1.0.3/dist/vits-web.js',
-  ];
-  for (const url of urls) {
-    try {
-      const mod = await import(url);
-      window._vitsLib = mod;
-      console.log('VITS loaded from:', url);
-      window.dispatchEvent(new Event('vits-ready'));
-      return;
-    } catch(e) {
-      console.warn('VITS load failed from', url, e.message);
-    }
-  }
-  // Semua gagal — gunakan browser TTS saja
-  console.warn('VITS unavailable, using browser TTS fallback');
-  window._vitsLib = null;
-  window.dispatchEvent(new Event('vits-ready'));
-}
-loadVitsLib();
-</script>
-
-<!-- Anime char container -->
-<div id="anime-char-wrap" style="
-  display:none;
-  position:fixed;
-  bottom:52px; right:16px;
-  width:190px; height:310px;
-  z-index:9990;
-  filter:drop-shadow(0 0 18px rgba(255,107,157,0.55));
-  transition:filter .3s;
-">
-  <canvas id="anime-vrm-canvas" width="190" height="310"
-    style="width:190px;height:310px;border-radius:14px;cursor:pointer;pointer-events:all;display:block;"></canvas>
-
-  <!-- Speech bubble -->
-  <div id="anime-bubble" style="
-    display:none;
-    position:absolute;
-    bottom:315px; right:0;
-    background:linear-gradient(135deg,rgba(255,240,250,.97),rgba(240,220,255,.97));
-    border:2px solid #ff6b9d;
-    border-radius:18px 18px 4px 18px;
-    padding:10px 14px;
-    font-size:12px; color:#7c3aed;
-    font-family:sans-serif;
-    max-width:230px; min-width:110px;
-    box-shadow:0 4px 20px rgba(255,107,157,.3);
-    text-align:center; font-weight:500; line-height:1.5;
-    pointer-events:none; z-index:9999;
-    word-break:break-word;
-  "></div>
-
-  <!-- Download progress bar -->
-  <div id="vits-dl-bar" style="
-    display:none;
-    position:absolute;
-    bottom:-30px; left:0; right:0;
-    background:rgba(0,0,0,.5);
-    border-radius:8px; padding:4px 8px;
-    font-size:10px; color:#fff; font-family:sans-serif;
-    text-align:center;
-  ">⬇️ Downloading voice model...</div>
-</div>
-
-<!-- CSS animasi -->
-<style>
-@keyframes charPopIn  {from{transform:scale(0) translateY(30px);opacity:0}to{transform:scale(1);opacity:1}}
-@keyframes charPopOut {from{opacity:1}to{transform:scale(0) translateY(30px);opacity:0}}
-@keyframes bubbleIn   {from{transform:scale(.5) translateY(8px);opacity:0}to{transform:scale(1);opacity:1}}
-@keyframes bubbleOut  {to{opacity:0;transform:scale(.8)}}
-@keyframes tabFling   {0%{transform:scale(1) rotate(0deg);opacity:1}100%{transform:scale(.2) rotate(900deg) translateY(-400px) translateX(300px);opacity:0}}
-#anime-char-wrap:hover{filter:drop-shadow(0 0 28px rgba(255,107,157,.85)) !important;}
-</style>
-
-<script type="module">
-import * as THREE  from 'three';
-import { GLTFLoader }      from 'three/addons/loaders/GLTFLoader.js';
-import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-
-// ── DOM refs ──────────────────────────────────────────
-const wrap    = document.getElementById('anime-char-wrap');
-const canvas  = document.getElementById('anime-vrm-canvas');
-const bubble  = document.getElementById('anime-bubble');
-const dlBar   = document.getElementById('vits-dl-bar');
-
-// ── State ─────────────────────────────────────────────
-let vrm = null, renderer, scene, camera, clock;
-let charVisible   = false;
-let charMood      = 'idle';
-let headTarget    = { x: 0, y: 0 };
-let blinkT        = 0;
-let mouthOpenAmt  = 0;
-let bubbleTimer   = null;
-let idleTimer     = null;
-let animFrameId   = null;
-
-// ── VRM public face expressions (blendshapes) ─────────
-const EXPR = {
-  happy:      ['happy',       'Joy'],
-  angry:      ['angry',       'Angry'],
-  sad:        ['sad',         'Sorrow'],
-  surprised:  ['surprised',   'Surprised'],
-  relaxed:    ['relaxed',     'Fun'],
-  blink:      ['blinkLeft',   'BlinkL'],
-  blinkR:     ['blinkRight',  'BlinkR'],
-  aa:         ['aa',          'A'],  // mouth open
-};
-function expr(key, val) {
-  if (!vrm?.expressionManager) return;
-  const names = EXPR[key] || [key];
-  for (const n of names) {
-    try { vrm.expressionManager.setValue(n, val); return; } catch(e){}
-  }
-}
-
-// ── Init Three.js renderer ────────────────────────────
-function initRenderer() {
-  renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
-  renderer.setSize(190, 310);
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-  renderer.setClearColor(0x000000, 0);
-
-  scene  = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(30, 190/310, 0.1, 20);
-  camera.position.set(0, 1.35, 3.8);
-  camera.lookAt(0, 1.2, 0);
-  clock = new THREE.Clock();
-
-  // Lighting — anime-style
-  scene.add(new THREE.AmbientLight(0xfff0f8, 0.7));
-  const dir = new THREE.DirectionalLight(0xffffff, 1.1);
-  dir.position.set(1, 3, 2); scene.add(dir);
-  const fill = new THREE.DirectionalLight(0xffaaee, 0.45);
-  fill.position.set(-2, 0, 1); scene.add(fill);
-  const rim = new THREE.DirectionalLight(0xaaaaff, 0.25);
-  rim.position.set(0, -1, -2); scene.add(rim);
-}
-
-// ── Load VRM model ─────────────────────────────────────
-const VRM_URLS = [
-  // three-vrm official sample girl
-  'https://raw.githubusercontent.com/pixiv/three-vrm/dev/packages/three-vrm/examples/models/VRM1_Constraint_Twist_Sample.vrm',
-  // Seed-san official VRM sample
-  'https://raw.githubusercontent.com/vrm-c/vrm-specification/master/samples/Seed-san/vrm/Seed-san.vrm',
-];
-
-async function loadVRM() {
-  const loader = new GLTFLoader();
-  loader.register(p => new VRMLoaderPlugin(p));
-
-  for (const url of VRM_URLS) {
-    try {
-      const gltf = await new Promise((res, rej) => {
-        loader.load(url, res, undefined, rej);
-      });
-      vrm = gltf.userData.vrm;
-      VRMUtils.removeUnnecessaryVertices(vrm.scene);
-      VRMUtils.combineSkeletons(vrm.scene);
-      vrm.scene.rotation.y = Math.PI; // hadap depan
-      scene.add(vrm.scene);
-      console.log('VRM loaded:', url);
-      return true;
-    } catch(e) {
-      console.warn('VRM load failed:', url, e.message);
-    }
-  }
-  return false;
-}
-
-// ── Animation loop ─────────────────────────────────────
-function startLoop() {
-  function loop() {
-    animFrameId = requestAnimationFrame(loop);
-    const dt      = clock.getDelta();
-    const elapsed = clock.getElapsedTime();
-
-    if (!vrm) { renderer.render(scene, camera); return; }
-
-    vrm.update(dt);
-
-    // Breathing — gentle spine bob
-    const spine = vrm.humanoid?.getNormalizedBoneNode('spine');
-    if (spine) spine.rotation.z = Math.sin(elapsed * 1.8) * 0.012;
-
-    // Head track mouse
-    const neck = vrm.humanoid?.getNormalizedBoneNode('neck');
-    if (neck) {
-      neck.rotation.x += (headTarget.y * 0.38 - neck.rotation.x) * 0.07;
-      neck.rotation.y += (-headTarget.x * 0.38 - neck.rotation.y) * 0.07;
-    }
-
-    // Arm idle sway
-    const armL = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm');
-    const armR = vrm.humanoid?.getNormalizedBoneNode('rightUpperArm');
-    if (armL) armL.rotation.z = 0.6 + Math.sin(elapsed * 1.2) * 0.06;
-    if (armR) armR.rotation.z = -(0.6 + Math.sin(elapsed * 1.2 + 1) * 0.06);
-
-    // Auto blink every ~4s
-    blinkT += dt;
-    if (blinkT > 3.8 + Math.random()) {
-      blinkT = 0;
-      expr('blink', 1); expr('blinkR', 1);
-      setTimeout(() => { expr('blink', 0); expr('blinkR', 0); }, 130);
-    }
-
-    // Mouth animate when VITS speaking
-    const speaking = window._vitsPlaying || false;
-    const targetMouth = speaking ? (Math.sin(elapsed * 18) * 0.5 + 0.5) : 0;
-    mouthOpenAmt += (targetMouth - mouthOpenAmt) * 0.25;
-    expr('aa', mouthOpenAmt);
-
-    // Mood expressions
-    if (charMood === 'happy')       { expr('happy', 0.8); expr('sad', 0); expr('angry', 0); }
-    else if (charMood === 'sad')    { expr('sad', 0.7); expr('happy', 0); }
-    else if (charMood === 'angry')  { expr('angry', 0.9); expr('happy', 0); }
-    else if (charMood === 'embarrassed') { expr('happy', 0.5); expr('surprised', 0.4); }
-    else                            { expr('happy', 0); expr('sad', 0); expr('angry', 0); }
-
-    renderer.render(scene, camera);
-  }
-  loop();
-}
-
-// ── VITS TTS system ───────────────────────────────────
-let vitsReady = false;
-let vitsQueue = [];
-let vitsPlaying = false;
-let vitsLastSpeak = 0;
-const VITS_COOLDOWN = 6000; // 6 detik
-
-async function initVITS() {
-  if (window._vitsLib) { vitsReady = true; return; }
-  await new Promise(res => window.addEventListener('vits-ready', res, { once: true }));
-  vitsReady = true;
-}
-
-async function vitsSpeak(text, opts = {}) {
-  // Respect cooldown (kecuali force)
-  const now = Date.now();
-  if (!opts.force && now - vitsLastSpeak < VITS_COOLDOWN) return;
-
-  if (!vitsReady) return;
-  const lib = window._vitsLib;
-  if (!lib) return;
-
-  // Cancel existing browser TTS
-  if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel();
-
-  // Clean text
-  const clean = text
-    .replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}]/gu, '')
-    .replace(/\s+/g, ' ').trim().substring(0, 80);
-  if (!clean || clean.length < 2) return;
-
-  vitsLastSpeak = now;
-  vitsQueue.push({ text: clean, opts });
-  if (!vitsPlaying) _processVitsQueue();
-}
-
-// ── Anime pitch processor ─────────────────────────────
-// Naikan pitch + reverb + gentle vibrato biar kedengeran kayak cewek anime
-async function playAnimeVoice(wavBlob) {
-  return new Promise((resolve) => {
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const reader   = new FileReader();
-    reader.onload  = async (e) => {
-      try {
-        const decoded = await audioCtx.decodeAudioData(e.target.result);
-        const source  = audioCtx.createBufferSource();
-        source.buffer = decoded;
-
-        // ── Pitch shift naik ~4 semitone biar lebih cewek/anime ──
-        // playbackRate 1.26 ≈ +4 semitone
-        source.playbackRate.value = 1.26;
-
-        // ── Vibrato LFO (5Hz, depth kecil = anime trembling effect) ──
-        const vibratoLFO  = audioCtx.createOscillator();
-        const vibratoGain = audioCtx.createGain();
-        vibratoLFO.frequency.value = 5.5;
-        vibratoGain.gain.value     = 0.008;
-        vibratoLFO.connect(vibratoGain);
-        vibratoGain.connect(source.playbackRate);
-        vibratoLFO.start();
-
-        // ── Convolver reverb ringan (bikin suaranya lebih "room" / warm) ──
-        const convolver = audioCtx.createConvolver();
-        const irLength  = audioCtx.sampleRate * 0.15;
-        const irBuffer  = audioCtx.createBuffer(2, irLength, audioCtx.sampleRate);
-        for (let ch = 0; ch < 2; ch++) {
-          const data = irBuffer.getChannelData(ch);
-          for (let i = 0; i < irLength; i++) {
-            data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / irLength, 3.5);
-          }
-        }
-        convolver.buffer = irBuffer;
-
-        // ── EQ: boost 3kHz dikit biar lebih bright/anime ──
-        const eqHigh = audioCtx.createBiquadFilter();
-        eqHigh.type            = 'peaking';
-        eqHigh.frequency.value = 3000;
-        eqHigh.gain.value      = 4;
-        eqHigh.Q.value         = 1;
-
-        // ── Compressor biar level konsisten ──
-        const comp = audioCtx.createDynamicsCompressor();
-        comp.threshold.value = -18;
-        comp.ratio.value     = 4;
-        comp.attack.value    = 0.003;
-        comp.release.value   = 0.15;
-
-        // ── Mix: dry 75% + reverb 25% ──
-        const dryGain = audioCtx.createGain();  dryGain.gain.value  = 0.75;
-        const wetGain = audioCtx.createGain();  wetGain.gain.value  = 0.25;
-
-        source.connect(eqHigh);
-        eqHigh.connect(dryGain);
-        eqHigh.connect(convolver);
-        convolver.connect(wetGain);
-        dryGain.connect(comp);
-        wetGain.connect(comp);
-        comp.connect(audioCtx.destination);
-
-        source.onended = () => {
-          vibratoLFO.stop();
-          audioCtx.close();
-          resolve();
-        };
-        source.start(0);
-      } catch(err) {
-        audioCtx.close();
-        resolve();
-      }
-    };
-    reader.readAsArrayBuffer(wavBlob);
-  });
-}
-
-async function _processVitsQueue() {
-  if (!vitsQueue.length) { vitsPlaying = false; window._vitsPlaying = false; return; }
-  vitsPlaying = true; window._vitsPlaying = true;
-
-  const { text, opts } = vitsQueue.shift();
-  try {
-    const lib = window._vitsLib;
-    // en_US-hfc_female-medium = satu-satunya female voice di library ini
-    // Pitch shifter di atas bakal bikin dia kedengeran anime cewek!
-    const FEMALE_VOICE = 'en_US-hfc_female-medium';
-
-    // esm.sh might wrap exports differently — cek semua kemungkinan export shape
-    const predictFn = lib?.predict || lib?.default?.predict || lib?.Vits?.predict;
-    if (!lib || !predictFn) {
-      useBrowserTTS(text, opts);
-      vitsPlaying = false; window._vitsPlaying = false;
-      setTimeout(_processVitsQueue, 200);
-      return;
-    }
-
-    let wav;
-    try {
-      wav = await predictFn({ text, voiceId: FEMALE_VOICE });
-    } catch(e) {
-      // Fallback browser TTS kalau VITS error
-      useBrowserTTS(text, opts);
-      vitsPlaying = false; window._vitsPlaying = false;
-      setTimeout(_processVitsQueue, 200);
-      return;
-    }
-
-    // Play dengan anime pitch processor!
-    await playAnimeVoice(wav);
-    vitsPlaying = false; window._vitsPlaying = false;
-    setTimeout(_processVitsQueue, 150);
-  } catch(e) {
-    console.warn('VITS error:', e);
-    vitsPlaying = false; window._vitsPlaying = false;
-    setTimeout(_processVitsQueue, 200);
-  }
-}
-
-// Browser TTS fallback kalau VITS gagal
-function useBrowserTTS(text, opts = {}) {
-  if (typeof speechSynthesis === 'undefined') return;
-  const utt = new SpeechSynthesisUtterance(text);
-  utt.pitch = opts.pitch ?? 2.0;
-  utt.rate  = opts.rate  ?? 1.25;
-  utt.volume = 0.9;
-  utt.lang = 'id-ID';
-  const voices = speechSynthesis.getVoices();
-  const fv = voices.find(v => /female|zira|samantha|karen|fiona/i.test(v.name));
-  if (fv) utt.voice = fv;
-  utt.onend = () => { window._vitsPlaying = false; };
-  window._vitsPlaying = true;
-  speechSynthesis.speak(utt);
-}
-
-// ── Pre-download VITS model saat wibu mode aktif ──────
-async function predownloadVITS() {
-  if (!vitsReady || !window._vitsLib) return;
-  dlBar.style.display = 'block';
-  try {
-    // ✅ en_US-hfc_female-medium = female voice (pitch shifted jadi anime)
-    await window._vitsLib.download('en_US-hfc_female-medium', (p) => {
-      const pct = Math.round(p.loaded / p.total * 100);
-      dlBar.textContent = `⬇️ Voice model: ${pct}%`;
-    });
-  } catch(e) {}
-  dlBar.style.display = 'none';
-}
-
-// ── Speech bubble ──────────────────────────────────────
-function charSay(text, duration = 4500) {
-  bubble.textContent = text;
-  bubble.style.display = 'block';
-  bubble.style.animation = 'bubbleIn .3s ease-out';
-  if (bubbleTimer) clearTimeout(bubbleTimer);
-  bubbleTimer = setTimeout(() => {
-    bubble.style.animation = 'bubbleOut .2s ease-in forwards';
-    setTimeout(() => { bubble.style.display = 'none'; }, 200);
-  }, duration);
-}
-window.animeCharSay = charSay;
-
-// ── Show/hide ──────────────────────────────────────────
-function showChar() {
-  wrap.style.display = 'block';
-  wrap.style.animation = 'charPopIn .5s cubic-bezier(.34,1.56,.64,1)';
-  charVisible = true;
-}
-function hideChar() {
-  wrap.style.animation = 'charPopOut .3s ease-in forwards';
-  setTimeout(() => { wrap.style.display = 'none'; charVisible = false; }, 300);
-}
-window.showAnimeChar = showChar;
-window.hideAnimeChar = hideChar;
-
-// ── Mood ───────────────────────────────────────────────
-function setMood(mood, dur = 3000) {
-  charMood = mood;
-  if (dur > 0) setTimeout(() => charMood = 'idle', dur);
-}
-window.setCharMood = setMood;
-
-// ── OS event bridge ───────────────────────────────────
-const evMap = {
-  open:    { say: ['Yatta! Aplikasinya dibuka senpai!','Sugoi! Loading ya~','Hai hai! Siap!'], mood:'happy' },
-  close:   { say: ['Sayonara senpai~','Mata ne! Jangan lupa balik ya~','Bye bye!'],            mood:'idle'  },
-  ram:     { say: ['Yamete! RAM penuh senpai!','Aduh RAM hampir habis!','Dame! RAM overload!'], mood:'angry' },
-  headpat: { say: ['Kyaa~!','Iyaa~!','Kimochi~!','Uwa~!','Senpai mou~!'],                    mood:'embarrassed'},
-  minimize:{ say: ['Mmm, disimpan dulu ya~','Aku tunggu di bawah!'],                           mood:'idle'  },
-  maximize:{ say: ['Wah besar! Sugoi~','Waaah layar penuh! Kakkoi!'],                          mood:'happy' },
-  error:   { say: ['Aduh error senpai! Gomenasai~','Nande?! Error!','Shimatta!'],              mood:'sad'   },
-  login:   { say: ['Selamat datang senpai!','Ohayo! Siap melayanimu~'],                        mood:'happy' },
-  greeting:{ say: ['Ohayo gozaimasu senpai! Selamat datang!','Konnichiwa! Akhirnya kamu datang~','Okaeri senpai! Aku sudah menunggu!'], mood:'happy'},
-};
-
-window.onAnimeCharEvent = function(type) {
-  if (!charVisible) return;
-  const ev = evMap[type];
-  if (!ev) return;
-  const said = ev.say[Math.floor(Math.random() * ev.say.length)];
-  setMood(ev.mood, 3000);
-  charSay(said, 4000);
-  vitsSpeak(said, { force: type === 'greeting' || type === 'login' });
-};
-
-// VITS bridge untuk non-module speakAnime calls
-window._vitsSpeakBridge = function(text, opts) {
-  vitsSpeak(text, opts);
-};
-// Global speakAnime → gunakan VITS
-window.speakAnime = function(text, opts = {}) {
-  if (typeof osWibuMode !== 'undefined' && !osWibuMode) return;
-  if (typeof animeVoiceEnabled !== 'undefined' && !animeVoiceEnabled) return;
-  vitsSpeak(text, opts);
-};
-
-// ── Tab/page events ───────────────────────────────────
-document.addEventListener('visibilitychange', () => {
-  if (!charVisible || (typeof osWibuMode !== 'undefined' && !osWibuMode)) return;
-  if (document.hidden) {
-    setMood('angry', 999999);
-    charSay('OI! SENPAI MAU KEMANA?! 💢', 99999);
-    vitsSpeak('Oi! Senpai mau kemana!? Aku ditinggal!', { force: true });
-    // Lempar semua taskbar icons!
-    document.querySelectorAll('.taskbar-icon, [class*="taskbar"]').forEach(el => {
-      el.style.animation = 'tabFling .7s cubic-bezier(.55,0,1,.45) forwards';
-      setTimeout(() => { el.style.animation = ''; el.style.opacity = '1'; }, 800);
-    });
-  } else {
-    setMood('happy', 4000);
-    charSay('Okaeri senpai!! Aku kangen banget!! 😭💕', 5000);
-    setTimeout(() => vitsSpeak('Okaeri senpai! Aku kangen banget!', { force: true }), 600);
-  }
-});
-
-window.addEventListener('beforeunload', () => {
-  if (!charVisible) return;
-  document.querySelectorAll('.taskbar-icon, [class*="taskbar"]').forEach(el => {
-    el.style.transition = 'none';
-    el.style.animation = 'tabFling .4s ease-out forwards';
-  });
-});
-
-// ── Idle quotes setiap 50 detik ───────────────────────
-function startIdleQuotes() {
-  const quotes = [
-    ['Senpai, ayo main bareng~ 🎮', 'happy'],
-    ['Hmm, senpai lagi ngapain? 👀', 'idle'],
-    ['Aku di sini lho senpai~ 🌸', 'idle'],
-    ['Jangan lupa minum air ya senpai! 💧', 'happy'],
-    ['Senpai... bosen nunggu nih~ 😴', 'sad'],
-    ['Kyaa! Senpai masih ada~ 💕', 'happy'],
-  ];
-  idleTimer = setInterval(() => {
-    if (!charVisible || (typeof osWibuMode !== 'undefined' && !osWibuMode)) return;
-    if (Math.random() > 0.55) return;
-    const [say, mood] = quotes[Math.floor(Math.random() * quotes.length)];
-    setMood(mood, 4000);
-    charSay(say, 4000);
-    vitsSpeak(say.replace(/[^\w\s\-,!?.~]/g, ''));
-  }, 50000);
-}
-
-// ── Canvas click → react ───────────────────────────────
-canvas.addEventListener('click', () => {
-  if (!charVisible) return;
-  const opts = [
-    { say:'Kyaa! Jangan pegang sembarangan senpai~ >///<', mood:'embarrassed', tts:'Kyaa! Jangan pegang sembarangan senpai!' },
-    { say:'Ehehe~ Senpai perhatian ya! 💕',                 mood:'happy',       tts:'Ehehe~ Senpai perhatian ya!' },
-    { say:'Hai senpai! Ada yang bisa aku bantu? 🌸',        mood:'happy',       tts:'Hai senpai! Ada yang bisa aku bantu?' },
-    { say:'M-mou senpai~ aku jadi malu deh~ 😳',            mood:'embarrassed', tts:'Mou senpai, aku jadi malu!' },
-    { say:'Uwaa~! Senpai klik aku lagi! Sugoi! ✨',          mood:'happy',       tts:'Uwaa! Senpai klik aku lagi! Sugoi!' },
-  ];
-  const o = opts[Math.floor(Math.random() * opts.length)];
-  setMood(o.mood, 3500);
-  charSay(o.say, 4500);
-  vitsSpeak(o.tts, { force: true });
-});
-
-// ── Mouse → head tracking ─────────────────────────────
-document.addEventListener('mousemove', e => {
-  if (!charVisible) return;
-  const rect = canvas.getBoundingClientRect();
-  const cx = rect.left + rect.width/2, cy = rect.top + rect.height/2;
-  headTarget.x = Math.max(-0.5, Math.min(0.5, (e.clientX - cx) / innerWidth  * 1.4));
-  headTarget.y = Math.max(-0.3, Math.min(0.4, -(e.clientY - cy) / innerHeight * 0.9));
-});
-
-// ── Boot: hook into wibu mode ─────────────────────────
-const _charOrigApply = window.applyWibuMode;
-window.applyWibuMode = function(enable) {
-  if (_charOrigApply) _charOrigApply(enable);
-  if (enable) {
-    setTimeout(async () => {
-      initRenderer();
-      const loaded = await loadVRM();
-      if (!loaded) console.warn('All VRM URLs failed, rendering empty scene');
-      startLoop();
-      showChar();
-      await initVITS();
-      predownloadVITS();
-      startIdleQuotes();
-      setTimeout(() => {
-        charSay('Ohayo senpai~! Aku siap menemanimu! 🌸', 6000);
-        vitsSpeak('Ohayo gozaimasu senpai! Aku siap menemanimu!', { force: true });
-        setMood('happy', 5000);
-      }, 1200);
-    }, 800);
-  } else {
-    if (charVisible) {
-      charSay('Mata ne senpai~ 👋', 2500);
-      vitsSpeak('Mata ne senpai!', { force: true });
-      setTimeout(hideChar, 2600);
-    }
-    if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
-    if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
-  }
-};
-
-// Init kalau wibu mode sudah aktif saat load
-if (typeof osWibuMode !== 'undefined' && osWibuMode) {
-  setTimeout(async () => {
-    initRenderer();
-    await loadVRM();
-    startLoop();
-    showChar();
-    await initVITS();
-    predownloadVITS();
-    startIdleQuotes();
-    charSay('Ohayo senpai~! Aku siap menemanimu! 🌸', 6000);
-    vitsSpeak('Ohayo gozaimasu senpai!', { force: true });
-    setMood('happy', 5000);
-  }, 1600);
-}
-
-</script>
 </body>
 </html>
